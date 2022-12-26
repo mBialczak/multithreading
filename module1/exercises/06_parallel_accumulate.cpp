@@ -8,51 +8,43 @@
 #include <vector>
 
 template <typename It, typename T>
-void calcPartForThread(It beg, It end, T& result, std::mutex& mtx)
+void calcPartForThread(It beg, It end, T& partialResult)
 {
-    T partialResult = std::accumulate(beg, end, 0);
-    std::lock_guard<std::mutex> lock(mtx);
-    result += partialResult;
-}
-template <typename It>
-using ThreadsVectorWithNextPos = std::pair<std::vector<std::thread>, It>;
-
-template <typename It, typename T>
-ThreadsVectorWithNextPos<It> runPartCalcsInThreads(It beg, It end, T& result, std::mutex& mtx)
-{
-    std::vector<std::thread> threads;
-    // we want to count last chunk in main thread so -1
-    const long int numberOfHwThreads = std::thread::hardware_concurrency() - 1;
-    constexpr unsigned minElementsForThread = 200'000;
-    const auto numberOfAllElements = std::distance(beg, end);
-    const long int neededThreads = std::min(numberOfAllElements / minElementsForThread, numberOfHwThreads);
-    const auto chunkSize = numberOfAllElements / numberOfHwThreads;
-    for (unsigned i = 0; i < neededThreads; ++i) {
-        It nextPartStart = std::next(beg, chunkSize);
-        threads.emplace_back(calcPartForThread<It, T>,
-                             beg,
-                             nextPartStart,
-                             std::ref(result),
-                             std::ref(mtx));
-        beg = nextPartStart;
-    }
-
-    return { std::move(threads), beg };
+    partialResult = std::accumulate(beg, end, T {});
 }
 
 template <typename It, typename T>
 T parallelAccumulate(It first, It last, T init)
 {
-    std::mutex resultMtx;
-    auto&& [threads, lastChunkStart] = runPartCalcsInThreads(first, last, init, resultMtx);
+    std::vector<std::thread> threads;
+    constexpr unsigned minElementsForThread = 200'000;
+    const long int numberOfHwThreads = std::thread::hardware_concurrency();
+    const auto numberOfAllElements = std::distance(first, last);
+    const long int neededThreads = std::min(numberOfAllElements / minElementsForThread, numberOfHwThreads);
+    if (neededThreads < 2) {
+        return std::accumulate(first, last, init);
+    }
+
+    const auto chunkSize = numberOfAllElements / neededThreads;
+    std::vector<T> partialResults(neededThreads);
+
+    for (int i = 0; i < neededThreads - 1; ++i) {
+        It nextPartStart = std::next(first, chunkSize);
+        threads.emplace_back(calcPartForThread<It, T>,
+                             first,
+                             nextPartStart,
+                             std::ref(partialResults[i]));
+        first = nextPartStart;
+    }
 
     // we calc last chunk till the end in main thread
-    calcPartForThread(lastChunkStart, last, init, resultMtx);
+    calcPartForThread(first, last, partialResults.back());
+
     for (auto&& th : threads) {
         th.join();
     }
 
-    return init;
+    return std::accumulate(partialResults.begin(), partialResults.end(), init);
 }
 
 int main()
@@ -60,13 +52,13 @@ int main()
     // std::vector<int> vec(1'000);   // thousand elements
     // std::vector<int> vec(10'000);   // ten thousand elements
     // std::vector<int> vec(100'000);   // one hundred thousand elements
-    std::vector<int> vec(500'000);   // 500 thousand elements
+    // std::vector<int> vec(300'000);   // 500 thousand elements
+    // std::vector<int> vec(500'000);   // 500 thousand elements
     // std::vector<int> vec(1'000'000);   // million elements
-    // std::vector<int> vec(2'000'000);   // 2 mililon elements
+    // std::vector<int> vec(2'000'000);   // 2 million elements
     // std::vector<int> vec(10'000'000);   // 10 million elements
-    // std::vector<int> vec(100'000'000);   // 100 million elements
-    // std::vector<int> vec(1'000'000'000);   // 100 million elements
-    std::generate(begin(vec), end(vec), [x { 0 }]() mutable { return ++x; });
+    std::vector<int> vec(1'000'000'000);   // 10 million elements
+
     auto start = std::chrono::steady_clock::now();
     int parallelResult = parallelAccumulate(std::begin(vec), std::end(vec), 0);
     auto stop = std::chrono::steady_clock::now();
